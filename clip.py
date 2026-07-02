@@ -1,4 +1,3 @@
-"""Main orchestrator CLI for reelsmith interview video editing pipeline."""
 import json
 import sys
 from pathlib import Path
@@ -11,21 +10,6 @@ from render import render_clip
 
 
 def parse_selection(raw: str, max_id: int) -> list[int]:
-    """Parse user selection input string into a list of candidate IDs.
-
-    Handles:
-    - "all" → [1, 2, ..., max_id]
-    - "1,3,5" → [1, 3, 5]
-    - "1,99" → [1] (99 is out of range, silently ignored)
-    - "1,abc,2" → [1, 2] (invalid tokens are silently ignored)
-
-    Args:
-        raw: User input string (e.g., "1,3" or "all")
-        max_id: Maximum valid candidate ID
-
-    Returns:
-        List of valid candidate IDs, in order parsed
-    """
     if raw.strip().lower() == "all":
         return list(range(1, max_id + 1))
     result = []
@@ -40,12 +24,6 @@ def parse_selection(raw: str, max_id: int) -> list[int]:
 
 
 def _print_candidates(candidates: list[dict]) -> None:
-    """Pretty-print the candidate segments to the terminal.
-
-    Args:
-        candidates: List of candidate dicts with id, title, start_time, end_time,
-                   angle, hook, summary
-    """
     print("\n" + "=" * 50)
     print("📋 候選短影音片段")
     print("=" * 50)
@@ -63,7 +41,6 @@ def _print_candidates(candidates: list[dict]) -> None:
 
 
 def main() -> None:
-    """Main CLI pipeline: transcribe → analyze → render clips."""
     part1 = config.INPUT_DIR / "part1.mp4"
     part2 = config.INPUT_DIR / "part2.mp4"
     transcript_cache = config.CACHE_DIR / "transcript.json"

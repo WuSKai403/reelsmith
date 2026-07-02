@@ -1,4 +1,3 @@
-"""Tests for the main orchestrator module."""
 from clip import parse_selection
 
 
