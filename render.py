@@ -1,6 +1,7 @@
 """ffmpeg render pipeline for producing 9:16 short-form interview clips."""
 import re
 import random
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -155,7 +156,7 @@ def _mix_music(input_path: Path, output_path: Path) -> Path:
     """
     music_files = list(config.MUSIC_DIR.glob("*.mp3"))
     if not music_files:
-        subprocess.run(["cp", str(input_path), str(output_path)], check=True)
+        shutil.copy2(input_path, output_path)
         return output_path
 
     music = random.choice(music_files)
@@ -244,19 +245,18 @@ def render_clip(
     subbed = work_dir / "_04_subbed.mp4"
     _burn_subtitles(cropped, srt_path, subbed)
 
-    # Step 5: Optional B-roll warmup (if B-roll available and cues exist)
-    concat_parts: list[Path] = []
-    if broll_paths and candidate.get("broll_cues"):
-        broll_out = work_dir / "_05_broll.mp4"
+    # Step 5: Title card (3 seconds) — always first
+    title_card = work_dir / "_05_titlecard.mp4"
+    create_title_card(name, interviewee_title, 3.0, title_card)
+    concat_parts: list[Path] = [title_card]
+
+    # Step 6: Optional B-roll warmup after title card
+    if broll_paths:
+        broll_out = work_dir / "_06_broll.mp4"
         _extract_broll_warmup(broll_paths, broll_out)
         concat_parts.append(broll_out)
 
-    # Step 6: Title card (3 seconds)
-    title_card = work_dir / "_06_titlecard.mp4"
-    create_title_card(name, interviewee_title, 3.0, title_card)
-    concat_parts.append(title_card)
-
-    # Main interview clip comes after title card
+    # Interview clip last
     concat_parts.append(subbed)
 
     # Step 7: Concatenate
@@ -270,6 +270,6 @@ def render_clip(
     # Final output with safe filename
     safe_title = re.sub(r"[^\w一-鿿]", "_", candidate["title"])
     final_path = output_dir / f"{safe_title}.mp4"
-    subprocess.run(["cp", str(mixed), str(final_path)], check=True)
+    shutil.copy2(mixed, final_path)
 
     return final_path
