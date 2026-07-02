@@ -1,0 +1,275 @@
+"""ffmpeg render pipeline for producing 9:16 short-form interview clips."""
+import re
+import random
+import subprocess
+from pathlib import Path
+
+import config
+from srt import generate_srt
+from titlecard import create_title_card
+from broll import select_broll_clip
+from transcribe import get_duration
+
+
+def build_crop_filter(width: int, height: int) -> str:
+    """Build an ffmpeg crop+scale filter string to produce a 9:16 vertical frame.
+
+    Args:
+        width: Source video width in pixels
+        height: Source video height in pixels
+
+    Returns:
+        ffmpeg -vf filter string, e.g. "crop=1215:2160:1312:0,scale=1080:1920"
+    """
+    crop_w = int(height * 9 / 16)
+    x_offset = (width - crop_w) // 2
+    return f"crop={crop_w}:{height}:{x_offset}:0,scale=1080:1920"
+
+
+def determine_source_file(
+    start_time: float, part1_duration: float, part1: Path, part2: Path
+) -> tuple[Path, float]:
+    """Determine which source file a candidate segment comes from.
+
+    Assumes the candidate is fully contained within one part (no cross-part spans).
+
+    Args:
+        start_time: Absolute start time of the candidate (seconds, merged timeline)
+        part1_duration: Duration of part1 in seconds
+        part1: Path to the first interview video file
+        part2: Path to the second interview video file
+
+    Returns:
+        Tuple of (source Path, local start time within that file)
+    """
+    if start_time < part1_duration:
+        return part1, start_time
+    return part2, start_time - part1_duration
+
+
+# ---------------------------------------------------------------------------
+# Private pipeline helpers
+# ---------------------------------------------------------------------------
+
+def _extract_segment(source: Path, local_start: float, duration: float, output: Path) -> Path:
+    """Extract a video segment using ffmpeg stream copy (fast, no re-encode)."""
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-ss", str(local_start),
+        "-i", str(source),
+        "-t", str(duration),
+        "-c", "copy",
+        str(output),
+    ], check=True)
+    return output
+
+
+def _auto_edit(input_path: Path, output_path: Path) -> Path:
+    """Run auto-editor to remove silences / dead air from a clip."""
+    subprocess.run([
+        "auto-editor", str(input_path),
+        "--no-open",
+        "-o", str(output_path),
+    ], check=True)
+    return output_path
+
+
+def _get_video_dimensions(video_path: Path) -> tuple[int, int]:
+    """Return (width, height) of the first video stream via ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    w, h = map(int, result.stdout.strip().split(","))
+    return w, h
+
+
+def _crop_to_916(input_path: Path, output_path: Path) -> Path:
+    """Crop and scale a video to 1080×1920 (9:16) using centre crop."""
+    w, h = _get_video_dimensions(input_path)
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-vf", build_crop_filter(w, h),
+        "-c:a", "copy",
+        str(output_path),
+    ], check=True)
+    return output_path
+
+
+def _burn_subtitles(input_path: Path, srt_path: Path, output_path: Path) -> Path:
+    """Burn SRT subtitles into the video using the subtitles filter."""
+    style = "FontSize=22,PrimaryColour=&Hffffff,Alignment=2"
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-vf", f"subtitles={srt_path}:force_style='{style}'",
+        "-c:a", "copy",
+        str(output_path),
+    ], check=True)
+    return output_path
+
+
+def _extract_broll_warmup(broll_paths: list[Path], output: Path) -> Path:
+    """Pick a random B-roll clip, extract 7 seconds, then crop to 9:16."""
+    src, offset = select_broll_clip(broll_paths, duration_secs=7.0)
+    raw = output.parent / "_broll_raw.mp4"
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-ss", str(offset),
+        "-i", str(src),
+        "-t", "7",
+        "-c", "copy",
+        str(raw),
+    ], check=True)
+    return _crop_to_916(raw, output)
+
+
+def _concat_videos(parts: list[Path], output: Path) -> Path:
+    """Concatenate video files using the ffmpeg concat demuxer."""
+    concat_txt = output.parent / "_concat.txt"
+    concat_txt.write_text("\n".join(f"file '{p}'" for p in parts))
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", str(concat_txt),
+        "-c", "copy",
+        str(output),
+    ], check=True)
+    return output
+
+
+def _mix_music(input_path: Path, output_path: Path) -> Path:
+    """Mix background music into the video at MUSIC_VOLUME_DB.
+
+    If no .mp3 files are found in MUSIC_DIR, copies input to output unchanged.
+    """
+    music_files = list(config.MUSIC_DIR.glob("*.mp3"))
+    if not music_files:
+        subprocess.run(["cp", str(input_path), str(output_path)], check=True)
+        return output_path
+
+    music = random.choice(music_files)
+    vol_db = config.MUSIC_VOLUME_DB  # e.g. -20
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-stream_loop", "-1",
+        "-i", str(music),
+        "-filter_complex",
+        f"[1:a]volume={vol_db}dB[bg];[0:a][bg]amix=inputs=2:duration=first[aout]",
+        "-map", "0:v",
+        "-map", "[aout]",
+        "-c:v", "copy",
+        "-shortest",
+        str(output_path),
+    ], check=True)
+    return output_path
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
+
+def render_clip(
+    candidate: dict,
+    segments: list[dict],
+    name: str,
+    interviewee_title: str,
+    output_dir: Path,
+    broll_paths: list[Path],
+    part1: Path,
+    part2: Path,
+    part1_duration: float,
+) -> Path:
+    """Render a single candidate segment into a 9:16 short-form clip.
+
+    Pipeline:
+        1. Extract raw segment from source file
+        2. Run auto-editor to tighten pacing
+        3. Crop to 9:16
+        4. Burn subtitles
+        5. (Optional) Prepend B-roll warmup
+        6. Prepend title card
+        7. Concatenate all parts
+        8. Mix in background music
+
+    Args:
+        candidate: Dict with keys: title, start_time, end_time, broll_cues
+        segments: Full merged transcript segment list
+        name: Interviewee display name
+        interviewee_title: Interviewee title/role for title card
+        output_dir: Directory to write the final clip
+        broll_paths: List of B-roll video paths (may be empty)
+        part1: Path to interview part 1
+        part2: Path to interview part 2
+        part1_duration: Duration of part1 in seconds (merged timeline offset)
+
+    Returns:
+        Path to the final rendered output file
+    """
+    start = candidate["start_time"]
+    end = candidate["end_time"]
+    duration = end - start
+
+    # Working directory inside output_dir for intermediate files
+    work_dir = output_dir / "_work"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # Step 1: Extract raw segment
+    source, local_start = determine_source_file(start, part1_duration, part1, part2)
+    raw_segment = work_dir / "_01_raw.mp4"
+    _extract_segment(source, local_start, duration, raw_segment)
+
+    # Step 2: Auto-edit (silence removal)
+    auto_edited = work_dir / "_02_auto.mp4"
+    _auto_edit(raw_segment, auto_edited)
+
+    # Step 3: Crop to 9:16
+    cropped = work_dir / "_03_cropped.mp4"
+    _crop_to_916(auto_edited, cropped)
+
+    # Step 4: Generate SRT and burn subtitles
+    srt_path = work_dir / "_subtitles.srt"
+    generate_srt(segments, start, end, srt_path)
+    subbed = work_dir / "_04_subbed.mp4"
+    _burn_subtitles(cropped, srt_path, subbed)
+
+    # Step 5: Optional B-roll warmup (if B-roll available and cues exist)
+    concat_parts: list[Path] = []
+    if broll_paths and candidate.get("broll_cues"):
+        broll_out = work_dir / "_05_broll.mp4"
+        _extract_broll_warmup(broll_paths, broll_out)
+        concat_parts.append(broll_out)
+
+    # Step 6: Title card (3 seconds)
+    title_card = work_dir / "_06_titlecard.mp4"
+    create_title_card(name, interviewee_title, 3.0, title_card)
+    concat_parts.append(title_card)
+
+    # Main interview clip comes after title card
+    concat_parts.append(subbed)
+
+    # Step 7: Concatenate
+    concatenated = work_dir / "_07_concat.mp4"
+    _concat_videos(concat_parts, concatenated)
+
+    # Step 8: Mix music
+    mixed = work_dir / "_08_mixed.mp4"
+    _mix_music(concatenated, mixed)
+
+    # Final output with safe filename
+    safe_title = re.sub(r"[^\w一-鿿]", "_", candidate["title"])
+    final_path = output_dir / f"{safe_title}.mp4"
+    subprocess.run(["cp", str(mixed), str(final_path)], check=True)
+
+    return final_path
