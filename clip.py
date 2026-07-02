@@ -40,9 +40,28 @@ def _print_candidates(candidates: list[dict]) -> None:
     print()
 
 
+_VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv"}
+
+
+def _find_input_videos() -> tuple[Path, Path | None]:
+    videos = sorted(
+        p for p in config.INPUT_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() in _VIDEO_EXTS
+    )
+    if not videos:
+        print(f"❌ input/ 內找不到影片（支援：{', '.join(sorted(_VIDEO_EXTS))}）")
+        sys.exit(1)
+    part1 = videos[0]
+    part2 = videos[1] if len(videos) >= 2 else None
+    if part2:
+        print(f"✅ 發現兩支影片：{part1.name} + {part2.name}")
+    else:
+        print(f"✅ 發現一支影片：{part1.name}")
+    return part1, part2
+
+
 def main() -> None:
-    part1 = config.INPUT_DIR / "part1.mp4"
-    part2 = config.INPUT_DIR / "part2.mp4"
+    part1, part2 = _find_input_videos()
     transcript_cache = config.CACHE_DIR / "transcript.json"
     candidates_cache = config.CACHE_DIR / "candidates.json"
     config.OUTPUT_DIR.mkdir(exist_ok=True)
@@ -54,7 +73,7 @@ def main() -> None:
         segments = json.loads(transcript_cache.read_text())
     else:
         print("🎙️  開始轉逐字稿...")
-        segments = transcribe_videos(str(part1), str(part2))
+        segments = transcribe_videos(str(part1), str(part2) if part2 else None)
         transcript_cache.write_text(json.dumps(segments, ensure_ascii=False, indent=2))
         print(f"✅ 逐字稿完成，共 {len(segments)} 段")
 
@@ -89,6 +108,7 @@ def main() -> None:
     # Step 5: Get part1 duration for timeline offset
     part1_duration = get_duration(str(part1))
     print(f"✅ Part 1 時長：{part1_duration:.1f} 秒")
+    render_part2 = part2 if part2 else part1
 
     # Step 6: Render selected clips
     print("\n🎬 開始渲染短影音...")
@@ -105,7 +125,7 @@ def main() -> None:
                 output_dir=config.OUTPUT_DIR,
                 broll_paths=broll_paths,
                 part1=part1,
-                part2=part2,
+                part2=render_part2,
                 part1_duration=part1_duration,
             )
             rendered_clips.append(output_path)

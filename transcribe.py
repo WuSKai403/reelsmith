@@ -46,10 +46,12 @@ def merge_transcripts(
     return part1 + offset_part2
 
 
-def transcribe_videos(part1_path: str, part2_path: str) -> list[dict]:
-    """Transcribe two interview video files and merge their transcripts."""
+def transcribe_videos(part1_path: str, part2_path: str | None = None) -> list[dict]:
+    """Transcribe one or two interview video files and merge their transcripts."""
     print("⏳ Transcribing part 1...")
     part1 = _transcribe_one(part1_path)
+    if part2_path is None:
+        return part1
     duration = get_duration(part1_path)
     print("⏳ Transcribing part 2...")
     part2 = _transcribe_one(part2_path)
