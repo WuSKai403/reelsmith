@@ -108,13 +108,16 @@ _TRANSPOSE_FILTER = {
 
 
 def _detect_rotation(video_path: Path) -> int:
-    """Return signed rotation in degrees from Display Matrix (0 if none)."""
+    """Return signed rotation in degrees from Display Matrix or rotate tag (0 if none).
+
+    Uses -show_streams (full info) because -show_entries stream=side_data_list
+    does not reliably include rotation sub-fields in all ffprobe versions.
+    """
     result = subprocess.run(
         [
             "ffprobe", "-v", "quiet",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=side_data_list",
-            "-of", "json",
+            "-print_format", "json",
+            "-show_streams",
             str(video_path),
         ],
         capture_output=True,
@@ -123,6 +126,13 @@ def _detect_rotation(video_path: Path) -> int:
     )
     data = json.loads(result.stdout)
     for stream in data.get("streams", []):
+        if stream.get("codec_type") != "video":
+            continue
+        # Older MOV files use a rotate tag
+        rotate = stream.get("tags", {}).get("rotate")
+        if rotate:
+            return int(rotate)
+        # Newer files use Display Matrix side data
         for sd in stream.get("side_data_list", []):
             if "rotation" in sd:
                 return int(float(sd["rotation"]))
@@ -155,8 +165,7 @@ def _crop_to_916(input_path: Path, output_path: Path, rotation: int = 0) -> Path
 
 def _burn_subtitles(input_path: Path, srt_path: Path, output_path: Path) -> Path:
     """Burn SRT subtitles into the video using the subtitles filter."""
-    # PlayResX/Y tells libass the actual canvas size so subtitle positions are correct.
-    style = "FontSize=22,PrimaryColour=&Hffffff,Alignment=2,PlayResX=1080,PlayResY=1920"
+    style = "FontSize=22,PrimaryColour=&Hffffff,Alignment=2,MarginL=40,MarginR=40,MarginV=30"
     safe_path = str(srt_path).replace("'", r"\'").replace(":", r"\:")
     subprocess.run([
         "ffmpeg", "-y",
@@ -186,16 +195,53 @@ def _extract_broll_warmup(broll_paths: list[Path], output: Path) -> Path:
     return _crop_to_916(raw, output)
 
 
+def _has_audio(video_path: Path) -> bool:
+    """Return True if the video file has at least one audio stream."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "quiet", "-show_entries", "stream=codec_type",
+         "-of", "csv=p=0", str(video_path)],
+        capture_output=True, text=True, check=True,
+    )
+    return "audio" in result.stdout
+
+
 def _concat_videos(parts: list[Path], output: Path) -> Path:
-    """Concatenate video files using the ffmpeg concat demuxer."""
-    concat_txt = output.parent / "_concat.txt"
-    concat_txt.write_text("\n".join(f"file '{p}'" for p in parts))
+    """Concatenate video files using filter_complex concat.
+
+    Uses filter_complex so video-only clips (e.g. title card with no audio)
+    get a synthesised silent track, preventing audio loss in the final output.
+    """
+    n = len(parts)
+    inputs = []
+    for p in parts:
+        inputs += ["-i", str(p)]
+
+    # Build aevalsrc declarations for audio-less inputs first,
+    # then build the concat input pad list.
+    silent_defs = []
+    concat_pads = []
+    for i, p in enumerate(parts):
+        concat_pads.append(f"[{i}:v]")
+        if _has_audio(p):
+            concat_pads.append(f"[{i}:a]")
+        else:
+            dur = get_duration(str(p))
+            silent_defs.append(
+                f"aevalsrc=0:c=stereo:s=48000:d={dur:.3f}[sa{i}]"
+            )
+            concat_pads.append(f"[sa{i}]")
+
+    prefix = ";".join(silent_defs) + ";" if silent_defs else ""
+    filter_str = prefix + "".join(concat_pads) + f"concat=n={n}:v=1:a=1[vout][aout]"
+
     subprocess.run([
         "ffmpeg", "-y",
-        "-f", "concat",
-        "-safe", "0",
-        "-i", str(concat_txt),
-        "-c", "copy",
+        *inputs,
+        "-filter_complex", filter_str,
+        "-map", "[vout]",
+        "-map", "[aout]",
+        "-c:v", "libx264",
+        "-c:a", "aac",
         str(output),
     ], check=True)
     return output
@@ -297,6 +343,7 @@ def render_clip(
     # Step 1: Extract raw segment
     source, local_start = determine_source_file(start, part1_duration, part1, part2)
     source_rotation = _detect_rotation(source)  # read before auto-editor strips it
+    print(f"  [render] source={source.name}, rotation={source_rotation}°")
     raw_segment = work_dir / "_01_raw.mp4"
     _extract_segment(source, local_start, duration, raw_segment)
 
