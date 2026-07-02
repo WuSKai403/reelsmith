@@ -79,16 +79,41 @@ def _auto_edit(input_path: Path, output_path: Path) -> Path:
 
 
 def _get_video_dimensions(video_path: Path) -> tuple[int, int]:
-    """Return display (width, height), swapping axes if rotation metadata is 90° or 270°.
-
-    iPhones store portrait video as landscape pixels + rotate=90 metadata.
-    ffmpeg auto-rotates during decode, so the crop filter must use display dimensions.
-    """
+    """Return raw (width, height) of the first video stream via ffprobe."""
     result = subprocess.run(
         [
             "ffprobe", "-v", "quiet",
             "-select_streams", "v:0",
-            "-show_entries", "stream=width,height,side_data_list",
+            "-show_entries", "stream=width,height",
+            "-of", "csv=p=0",
+            str(video_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    w, h = map(int, result.stdout.strip().split(","))
+    return w, h
+
+
+# Maps Display Matrix signed rotation → ffmpeg transpose filter to bake it in.
+# auto-editor strips rotation metadata, so we detect from the original source
+# and apply transpose during the crop step.
+_TRANSPOSE_FILTER = {
+    -90: "transpose=2",    # iPhone portrait (most common)
+    90:  "transpose=1",
+    180: "hflip,vflip",
+    -180: "hflip,vflip",
+}
+
+
+def _detect_rotation(video_path: Path) -> int:
+    """Return signed rotation in degrees from Display Matrix (0 if none)."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "quiet",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=side_data_list",
             "-of", "json",
             str(video_path),
         ],
@@ -97,21 +122,31 @@ def _get_video_dimensions(video_path: Path) -> tuple[int, int]:
         check=True,
     )
     data = json.loads(result.stdout)
-    stream = data["streams"][0]
-    w, h = stream["width"], stream["height"]
-    for sd in stream.get("side_data_list", []):
-        if abs(int(sd.get("rotation", 0))) in (90, 270):
-            return h, w
-    return w, h
+    for stream in data.get("streams", []):
+        for sd in stream.get("side_data_list", []):
+            if "rotation" in sd:
+                return int(float(sd["rotation"]))
+    return 0
 
 
-def _crop_to_916(input_path: Path, output_path: Path) -> Path:
-    """Crop and scale a video to 1080×1920 (9:16) using centre crop."""
+def _crop_to_916(input_path: Path, output_path: Path, rotation: int = 0) -> Path:
+    """Crop and scale a video to 1080×1920 (9:16) using centre crop.
+
+    rotation: signed degrees from original source Display Matrix.
+    Applies transpose to bake orientation before cropping.
+    """
     w, h = _get_video_dimensions(input_path)
+    filters = []
+    transpose = _TRANSPOSE_FILTER.get(rotation)
+    if transpose:
+        filters.append(transpose)
+        if abs(rotation) == 90:
+            w, h = h, w  # swap to display dimensions after transpose
+    filters.append(build_crop_filter(w, h))
     subprocess.run([
         "ffmpeg", "-y",
         "-i", str(input_path),
-        "-vf", build_crop_filter(w, h),
+        "-vf", ",".join(filters),
         "-c:a", "copy",
         str(output_path),
     ], check=True)
@@ -120,7 +155,8 @@ def _crop_to_916(input_path: Path, output_path: Path) -> Path:
 
 def _burn_subtitles(input_path: Path, srt_path: Path, output_path: Path) -> Path:
     """Burn SRT subtitles into the video using the subtitles filter."""
-    style = "FontSize=22,PrimaryColour=&Hffffff,Alignment=2"
+    # PlayResX/Y tells libass the actual canvas size so subtitle positions are correct.
+    style = "FontSize=22,PrimaryColour=&Hffffff,Alignment=2,PlayResX=1080,PlayResY=1920"
     safe_path = str(srt_path).replace("'", r"\'").replace(":", r"\:")
     subprocess.run([
         "ffmpeg", "-y",
@@ -260,16 +296,17 @@ def render_clip(
 
     # Step 1: Extract raw segment
     source, local_start = determine_source_file(start, part1_duration, part1, part2)
+    source_rotation = _detect_rotation(source)  # read before auto-editor strips it
     raw_segment = work_dir / "_01_raw.mp4"
     _extract_segment(source, local_start, duration, raw_segment)
 
-    # Step 2: Auto-edit (silence removal)
+    # Step 2: Auto-edit (silence removal) — strips rotation metadata
     auto_edited = work_dir / "_02_auto.mp4"
     _auto_edit(raw_segment, auto_edited)
 
-    # Step 3: Crop to 9:16
+    # Step 3: Crop to 9:16, baking in source rotation via transpose
     cropped = work_dir / "_03_cropped.mp4"
-    _crop_to_916(auto_edited, cropped)
+    _crop_to_916(auto_edited, cropped, rotation=source_rotation)
 
     # Step 4: Generate SRT and burn subtitles
     srt_path = work_dir / "_subtitles.srt"
