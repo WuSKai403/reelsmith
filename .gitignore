@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Environment
+.env
+
+# Video & audio files (too large for git)
+*.mp4
+*.mov
+*.avi
+*.mp3
+*.wav
+
+# Generated outputs
+cache/*.json
+output/*
+!output/.gitkeep
+
+# OS
+.DS_Store
