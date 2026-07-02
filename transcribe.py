@@ -28,6 +28,7 @@ def _transcribe_one(video_path: str) -> list[dict]:
         path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
         language="zh",
         word_timestamps=True,
+        verbose=True,
     )
     return [
         {"text": seg["text"].strip(), "start": seg["start"], "end": seg["end"]}
