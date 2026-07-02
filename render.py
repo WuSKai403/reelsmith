@@ -1,4 +1,5 @@
 """ffmpeg render pipeline for producing 9:16 short-form interview clips."""
+import json
 import re
 import random
 import shutil
@@ -78,20 +79,29 @@ def _auto_edit(input_path: Path, output_path: Path) -> Path:
 
 
 def _get_video_dimensions(video_path: Path) -> tuple[int, int]:
-    """Return (width, height) of the first video stream via ffprobe."""
+    """Return display (width, height), swapping axes if rotation metadata is 90° or 270°.
+
+    iPhones store portrait video as landscape pixels + rotate=90 metadata.
+    ffmpeg auto-rotates during decode, so the crop filter must use display dimensions.
+    """
     result = subprocess.run(
         [
             "ffprobe", "-v", "quiet",
             "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-of", "csv=p=0",
+            "-show_entries", "stream=width,height,side_data_list",
+            "-of", "json",
             str(video_path),
         ],
         capture_output=True,
         text=True,
         check=True,
     )
-    w, h = map(int, result.stdout.strip().split(","))
+    data = json.loads(result.stdout)
+    stream = data["streams"][0]
+    w, h = stream["width"], stream["height"]
+    for sd in stream.get("side_data_list", []):
+        if abs(int(sd.get("rotation", 0))) in (90, 270):
+            return h, w
     return w, h
 
 
