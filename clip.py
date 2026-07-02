@@ -80,7 +80,7 @@ def main() -> None:
     print(f"✅ 已選擇 {len(selected_ids)} 個片段：{selected_ids}")
 
     # Step 4: Detect B-roll
-    broll_paths = detect_broll(config.BROLL_DIR)
+    broll_paths = detect_broll()
     if broll_paths:
         print(f"✅ 發現 {len(broll_paths)} 個 B-roll 影片")
     else:

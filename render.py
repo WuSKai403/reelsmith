@@ -44,8 +44,10 @@ def determine_source_file(
         Tuple of (source Path, local start time within that file)
     """
     if start_time < part1_duration:
-        return part1, start_time
-    return part2, start_time - part1_duration
+        source, local_start = part1, start_time
+    else:
+        source, local_start = part2, start_time - part1_duration
+    return source, local_start
 
 
 # ---------------------------------------------------------------------------
@@ -109,10 +111,11 @@ def _crop_to_916(input_path: Path, output_path: Path) -> Path:
 def _burn_subtitles(input_path: Path, srt_path: Path, output_path: Path) -> Path:
     """Burn SRT subtitles into the video using the subtitles filter."""
     style = "FontSize=22,PrimaryColour=&Hffffff,Alignment=2"
+    safe_path = str(srt_path).replace("'", r"\'").replace(":", r"\:")
     subprocess.run([
         "ffmpeg", "-y",
         "-i", str(input_path),
-        "-vf", f"subtitles={srt_path}:force_style='{style}'",
+        "-vf", f"subtitles='{safe_path}':force_style='{style}'",
         "-c:a", "copy",
         str(output_path),
     ], check=True)
@@ -164,13 +167,21 @@ def _mix_music(input_path: Path, output_path: Path) -> Path:
 
     music = random.choice(music_files)
     vol_db = config.MUSIC_VOLUME_DB  # e.g. -20
+    duration = get_duration(str(input_path))
+    fade_out_start = max(0.0, duration - 2.0)
+    filter_complex = (
+        f"[1:a]volume={vol_db}dB,"
+        f"afade=t=in:st=0:d=1,"
+        f"afade=t=out:st={fade_out_start:.3f}:d=2[bg];"
+        f"[0:a][bg]amix=inputs=2:duration=first[aout]"
+    )
     subprocess.run([
         "ffmpeg", "-y",
         "-i", str(input_path),
         "-stream_loop", "-1",
         "-i", str(music),
         "-filter_complex",
-        f"[1:a]volume={vol_db}dB[bg];[0:a][bg]amix=inputs=2:duration=first[aout]",
+        filter_complex,
         "-map", "0:v",
         "-map", "[aout]",
         "-c:v", "copy",
@@ -225,6 +236,14 @@ def render_clip(
     end = candidate["end_time"]
     duration = end - start
 
+    # Guard: reject segments that cross the part1/part2 boundary
+    if start < part1_duration < end:
+        raise ValueError(
+            f"Candidate '{candidate['title']}' spans both parts "
+            f"({start:.1f}–{end:.1f}s, part1 ends at {part1_duration:.1f}s). "
+            "Please select a segment fully within one part."
+        )
+
     # Working directory inside output_dir for intermediate files
     work_dir = output_dir / "_work"
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -250,7 +269,8 @@ def render_clip(
 
     # Step 5: Title card (3 seconds) — always first
     title_card = work_dir / "_05_titlecard.mp4"
-    create_title_card(name, interviewee_title, 3.0, title_card)
+    display_name = f"{name}  {interviewee_title}" if interviewee_title else name
+    create_title_card(display_name, candidate["title"], 3.0, title_card)
     concat_parts: list[Path] = [title_card]
 
     # Step 6: Optional B-roll warmup after title card

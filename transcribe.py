@@ -7,13 +7,18 @@ import mlx_whisper
 def get_duration(video_path: str) -> float:
     """Get duration of video file in seconds using ffprobe."""
     result = subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", video_path],
+        [
+            "ffprobe", "-v", "quiet",
+            "-show_entries", "format=duration",
+            "-of", "json",
+            video_path,
+        ],
         capture_output=True,
         text=True,
         check=True,
     )
-    info = json.loads(result.stdout)
-    return float(info["streams"][0]["duration"])
+    data = json.loads(result.stdout)
+    return float(data["format"]["duration"])
 
 
 def _transcribe_one(video_path: str) -> list[dict]:
