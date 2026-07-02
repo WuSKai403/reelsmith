@@ -100,8 +100,8 @@ def _get_video_dimensions(video_path: Path) -> tuple[int, int]:
 # auto-editor strips rotation metadata, so we detect from the original source
 # and apply transpose during the crop step.
 _TRANSPOSE_FILTER = {
-    -90: "transpose=2",    # iPhone portrait (most common)
-    90:  "transpose=1",
+    -90: "transpose=1",    # iPhone portrait: rotate CW 90° to undo -90° capture rotation
+    90:  "transpose=2",    # rotate CCW 90° to undo +90° capture rotation
     180: "hflip,vflip",
     -180: "hflip,vflip",
 }
@@ -165,7 +165,7 @@ def _crop_to_916(input_path: Path, output_path: Path, rotation: int = 0) -> Path
 
 def _burn_subtitles(input_path: Path, srt_path: Path, output_path: Path) -> Path:
     """Burn SRT subtitles into the video using the subtitles filter."""
-    style = "FontSize=22,PrimaryColour=&Hffffff,Alignment=2,MarginL=40,MarginR=40,MarginV=30"
+    style = "FontSize=18,PrimaryColour=&Hffffff,OutlineColour=&H000000,Outline=2,Alignment=2,WrapStyle=0,MarginL=60,MarginR=60,MarginV=40"
     safe_path = str(srt_path).replace("'", r"\'").replace(":", r"\:")
     subprocess.run([
         "ffmpeg", "-y",
