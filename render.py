@@ -355,9 +355,10 @@ def render_clip(
     cropped = work_dir / "_03_cropped.mp4"
     _crop_to_916(auto_edited, cropped, rotation=source_rotation)
 
-    # Step 4: Generate SRT and burn subtitles
-    srt_path = work_dir / "_subtitles.srt"
-    generate_srt(segments, start, end, srt_path)
+    # Step 4: Generate SRT (cached so re-renders skip transcription)
+    srt_path = config.CACHE_DIR / f"subtitles_{start:.3f}_{end:.3f}.srt"
+    if not srt_path.exists():
+        generate_srt(segments, start, end, srt_path)
     subbed = work_dir / "_04_subbed.mp4"
     _burn_subtitles(cropped, srt_path, subbed)
 
