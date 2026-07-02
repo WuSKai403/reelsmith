@@ -1,0 +1,5 @@
+mlx-whisper
+anthropic
+auto-editor
+python-dotenv
+pytest
