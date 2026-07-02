@@ -119,15 +119,18 @@ def _burn_subtitles(input_path: Path, srt_path: Path, output_path: Path) -> Path
     return output_path
 
 
+_BROLL_WARMUP_SECS = 7.0
+
+
 def _extract_broll_warmup(broll_paths: list[Path], output: Path) -> Path:
-    """Pick a random B-roll clip, extract 7 seconds, then crop to 9:16."""
-    src, offset = select_broll_clip(broll_paths, duration_secs=7.0)
+    """Pick a random B-roll clip, extract warmup duration, then crop to 9:16."""
+    src, offset = select_broll_clip(broll_paths, duration_secs=_BROLL_WARMUP_SECS)
     raw = output.parent / "_broll_raw.mp4"
     subprocess.run([
         "ffmpeg", "-y",
         "-ss", str(offset),
         "-i", str(src),
-        "-t", "7",
+        "-t", str(_BROLL_WARMUP_SECS),
         "-c", "copy",
         str(raw),
     ], check=True)
@@ -199,8 +202,8 @@ def render_clip(
         2. Run auto-editor to tighten pacing
         3. Crop to 9:16
         4. Burn subtitles
-        5. (Optional) Prepend B-roll warmup
-        6. Prepend title card
+        5. Prepend title card (always first)
+        6. (Optional) B-roll warmup after title card
         7. Concatenate all parts
         8. Mix in background music
 
